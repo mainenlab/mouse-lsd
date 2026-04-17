@@ -1,6 +1,8 @@
 import os
 import shutil
 import tarfile
+import numpy as np
+import pandas as pd
 from tqdm import tqdm
 from matplotlib import pyplot as plt
 
@@ -114,7 +116,7 @@ class SpikeSortingQC():
         return waveforms, channels
 
 
-    def run_bombcell(self):
+    def run_bombcell(self) -> pd.DataFrame:
         print("Preparing bombcell...")
         self.bombcell_dir = self.spike_sorting_dir / 'bombcell'
         if os.path.exists(self.bombcell_dir):
@@ -139,20 +141,41 @@ class SpikeSortingQC():
         print(f"    results saved to {self.bombcell_dir}")
 
         bombcell_results = pd.DataFrame.from_dict(quality_metrics)
-        bombcell_results['bc_label'] = unit_type_string
+        bombcell_results['label'] = unit_type_string
+
+        self.bombcell_param = param
+        self.bombcell_results = bombcell_results
 
         return bombcell_results
+
+
+    def attach_uuid(self, probe_units: pd.DataFrame) -> pd.DataFrame:
+        """Merge `uuid` from the units table onto `self.bombcell_results` by
+        `cluster_id`, verifying that spike counts match for every matched cluster."""
+        merged = self.bombcell_results.merge(
+            probe_units[['cluster_id', 'uuid', 'spike_count']],
+            left_on='phy_clusterID',
+            right_on='cluster_id',
+            how='inner',
+            validate='one_to_one',
+        )
+        if not np.array_equal(merged['nSpikes'].to_numpy(), merged['spike_count'].to_numpy()):
+            raise ValueError(
+                f"Spike counts disagree between bombcell and units for "
+                f"eid={self.eid}, probe={self.probe}"
+            )
+        self.bombcell_results = merged.drop(columns=['cluster_id', 'spike_count'])
+        return self.bombcell_results
 
 
 if __name__ == '__main__':
     one = ONE()
 
-    # Load sessions
-    df_units = load_units()  # session info
+    df_units = load_units()
 
     probes = df_units.groupby(['eid', 'probe'])
-    for (eid, probe), group in tqdm(probes, total=len(probes)):
+    for (eid, probe), probe_units in tqdm(probes, total=len(probes)):
         ssqc = SpikeSortingQC(eid, probe, one)
-        bombcell_results = ssqc.run_bombcell()
-        # TODO: merge bombcell results into units table
+        ssqc.run_bombcell()
+        bombcell_results = ssqc.attach_uuid(probe_units)
         ssqc.remove_spike_sorting()
