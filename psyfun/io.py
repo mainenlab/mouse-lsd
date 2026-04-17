@@ -422,14 +422,13 @@ def fetch_unit_info(one, df_insertions, uinfo_file='', spike_file='', atlas=atla
             for collection in loader.collections:
                 spikes = one.load_object(probe['eid'], collection=collection, obj='spikes', attribute=['times', 'clusters'])
                 with h5py.File(spike_file, 'a') as h5file:
-                    # Store spike times for each cluster as a separate dataset in the hdf file
+                    # One group per uuid; spike times under 'times', leaving room
+                    # for sibling datasets (e.g. 'duplicates', 'waveforms').
                     for uuid, cid in zip(df_probe['uuid'], df_probe['cluster_id']):
-                        # Separate spike times for each cluster
                         spike_times = spikes['times'][spikes['clusters'] == cid]
-                        # Delete existing dataset if present
                         if uuid in h5file: del h5file[uuid]
-                        # Create new dataset for this unit
-                        h5file.create_dataset(uuid, data=spike_times) #One single file with all the spikes, which can be accessed selectively by cluster without loading everything
+                        grp = h5file.create_group(uuid)
+                        grp.create_dataset('times', data=spike_times)
                 del spikes
         del clusters, loader
         # Append to list
@@ -444,16 +443,45 @@ def fetch_unit_info(one, df_insertions, uinfo_file='', spike_file='', atlas=atla
     return df_uinfo
 
 
-def load_spikes(uuids):
+def load_spikes(uuids, remove_duplicates: bool = True):
+    """Load per-uuid spike times from `paths['spikes']`.
+
+    If `remove_duplicates`, also reads the per-uuid 'duplicates' bool mask
+    and returns `times[~mask]`. Uuids without a 'duplicates' dataset get
+    raw times; a single aggregated warning is printed at the end.
+    """
     units = []
+    n_missing = 0
     with h5py.File(paths['spikes'], 'r') as h5file:
         for uuid in tqdm(uuids):
-            unit = {
-                'uuid': uuid,
-                'spike_times': h5file[uuid][:]
-            }
-            units.append(unit)
+            grp = h5file[uuid]
+            times = grp['times'][:]
+            if remove_duplicates:
+                if 'duplicates' in grp:
+                    times = times[~grp['duplicates'][:]]
+                else:
+                    n_missing += 1
+            units.append({'uuid': uuid, 'spike_times': times})
+    if remove_duplicates and n_missing:
+        print(
+            f"WARNING: {n_missing}/{len(uuids)} uuids had no 'duplicates' "
+            f"dataset; raw times returned for those"
+        )
     return pd.DataFrame(units).set_index('uuid')
+
+
+def save_duplicate_masks(masks: dict, spike_file) -> None:
+    """Write per-uuid duplicate-spike masks into the spikes h5 file.
+
+    Each `h5file[uuid]` must already be a group (created by the spike-saving
+    block of the units-table builder). Writes the bool mask as
+    `h5file[uuid]['duplicates']`, replacing any existing dataset.
+    """
+    with h5py.File(spike_file, 'a') as h5file:
+        for uuid, mask in masks.items():
+            grp = h5file[uuid]
+            if 'duplicates' in grp: del grp['duplicates']
+            grp.create_dataset('duplicates', data=mask.astype(bool))
 
 
 def load_sessions(drop_if_nan=TASKTIMINGS, drop_extra_columns=True):

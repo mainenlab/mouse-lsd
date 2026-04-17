@@ -224,20 +224,29 @@ class SpikeSortingQC():
         return fig, labels
 
 
-    def attach_uuid(self, probe_units: pd.DataFrame) -> pd.DataFrame:
-        """Merge `uuid` from the units table onto `self.bombcell_results` by
-        `cluster_id`, verifying that spike counts match for every matched cluster."""
-        merged = self.bombcell_results.merge(
-            probe_units[['cluster_id', 'uuid', 'spike_count']],
-            left_on='phy_clusterID',
-            right_on='cluster_id',
-            how='inner',
-            validate='one_to_one',
-        )
-        if not np.array_equal(merged['nSpikes'].to_numpy(), merged['spike_count'].to_numpy()):
-            raise ValueError(
-                f"Spike counts disagree between bombcell and units for "
-                f"eid={self.eid}, probe={self.probe}"
+    def set_uuid_map(self, probe_units: pd.DataFrame) -> pd.DataFrame:
+        """Store the `phy_clusterID` <-> `uuid` mapping from IBL `probe_units`."""
+        self.uuid_map = probe_units[['cluster_id', 'uuid']].rename(
+            columns={'cluster_id': 'phy_clusterID'}
+        ).reset_index(drop=True)
+        return self.uuid_map
+
+
+    def get_duplicate_masks(self) -> dict:
+        """Return per-uuid bool masks marking bombcell duplicate spikes.
+
+        True = duplicate. Reads `spikes._bc_duplicateSpikes.npy` written
+        when bombcell was run with `removeDuplicateSpikes=True` and re-keys
+        it by uuid using `spike_clusters.npy` from the kilosort directory.
+        Requires `set_uuid_map` to have been run.
+        """
+        if not hasattr(self, 'uuid_map'):
+            raise RuntimeError("set_uuid_map must be run before get_duplicate_masks")
+        dup_mask = np.load(self.bombcell_dir / 'spikes._bc_duplicateSpikes.npy').astype(bool)
+        spike_clusters = np.load(self.spike_sorting_dir / 'spike_clusters.npy')
+        return {
+            uuid: dup_mask[spike_clusters == cid]
+            for uuid, cid in zip(
+                self.uuid_map['uuid'], self.uuid_map['phy_clusterID']
             )
-        self.bombcell_results = merged.drop(columns=['cluster_id', 'spike_count'])
-        return self.bombcell_results
+        }

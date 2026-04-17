@@ -4,7 +4,7 @@ from tqdm import tqdm
 from one.api import ONE
 
 from psyfun.config import paths
-from psyfun.io import load_units
+from psyfun.io import load_units, save_duplicate_masks
 from psyfun.spike_sorting import SpikeSortingQC
 
 
@@ -17,8 +17,10 @@ if __name__ == '__main__':
     probes = df_units.groupby(['eid', 'probe'])
     for (eid, probe), probe_units in tqdm(probes, total=len(probes)):
         ssqc = SpikeSortingQC(eid, probe, one)
+        ssqc.set_bombcell_param(removeDuplicateSpikes=True)
         ssqc.run_bombcell()
-        bombcell_results = ssqc.attach_uuid(probe_units)
+        ssqc.set_uuid_map(probe_units)
+        save_duplicate_masks(ssqc.get_duplicate_masks(), paths['spikes'])
         all_results.append(bombcell_results)
         ssqc.remove_spike_sorting()
 
