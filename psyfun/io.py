@@ -511,15 +511,28 @@ def load_sessions(drop_if_nan=TASKTIMINGS, drop_extra_columns=True):
     return df_sessions
 
 
-def load_units(add_coarse_regions=True):
+def load_units(eids=None, unit_filter=None, add_coarse_regions=True):
     """Convenience function to load units data frame."""
     df_units = pd.read_parquet(paths['units'])
+
+    if eids:
+        df_units = df_units.query('eid in @eids')
+    print(f"N units: {len(df_units)}")
+
+    # Remove low-quality units
+    if unit_filter:
+        df_units = df_units.query(unit_filter)
+        print(f"    Good units: {len(df_units)}")
+    else:
+        print(f"    No unit filter applied.")
+
     if add_coarse_regions:
         df_units['coarse_region'] = region_parcellation(df_units['region'])
+
     return df_units
 
 
-def load_session_spikes():
+def load_session_spikes(unit_filter=None, remove_duplicate_spikes=True):
     """
     Convenience functions to load spike times and unit into for analyzable sessions.
     """
@@ -528,17 +541,11 @@ def load_session_spikes():
     eids = df_sessions['eid'].tolist()
 
     # Load units
-    df_units = load_units()  # unit info
-    df_units = df_units.query('eid in @eids')
-    print(f"Total units in valid sessions: {len(df_units)}")
-    # Remove low-quality units
-    if unit_filter:
-        df_units = df_units.query(unit_filter)
-        print(f"Good units in valid sessions: {len(df_units)}")
+    df_units = load_units(unit_filter=unit_filter)  # unit info
 
     # Load spike times
     print("Loading spike times...")
-    df_spiketimes = load_spikes(df_units['uuid'])
+    df_spiketimes = load_spikes(df_units['uuid'], remove_duplicates=remove_duplicate_spikes)
     # Join spike times with unit info
     df_spikes = df_units.set_index('uuid').join(df_spiketimes).reset_index()
     # Merge session info into spikes dataframe
