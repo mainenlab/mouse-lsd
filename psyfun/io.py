@@ -443,12 +443,24 @@ def fetch_unit_info(one, df_insertions, uinfo_file='', spike_file='', atlas=atla
     return df_uinfo
 
 
-def load_spikes(uuids, remove_duplicates: bool = True):
-    """Load per-uuid spike times from `paths['spikes']`.
+def load_spikes(uuids, remove_duplicates: bool = True) -> pd.DataFrame:
+    """
+    Load per-uuid spike times from the HDF5 file at `paths['spikes']`.
 
-    If `remove_duplicates`, also reads the per-uuid 'duplicates' bool mask
-    and returns `times[~mask]`. Uuids without a 'duplicates' dataset get
-    raw times; a single aggregated warning is printed at the end.
+    Parameters
+    ----------
+    uuids : iterable of str
+        Unit UUIDs to load. Each must exist as a group in the spikes h5 file.
+    remove_duplicates : bool
+        If True, read the per-uuid 'duplicates' bool mask and return
+        `times[~mask]`. Uuids without a 'duplicates' dataset get raw times;
+        a single aggregated warning is printed at the end.
+
+    Returns
+    -------
+    df_spiketimes : pandas.DataFrame
+        Dataframe indexed by uuid with a single 'spike_times' column holding
+        a numpy array of spike times per unit.
     """
     units = []
     n_missing = 0
@@ -484,17 +496,27 @@ def save_duplicate_masks(masks: dict, spike_file) -> None:
             grp.create_dataset('duplicates', data=mask.astype(bool))
 
 
-def load_sessions(drop_if_nan=TASKTIMINGS, drop_extra_columns=True):
+def load_sessions(
+    drop_if_nan: list = TASKTIMINGS,
+    drop_extra_columns: bool = True,
+) -> pd.DataFrame:
     """
-    Convenience function to load sessions data frame.
+    Load the sessions dataframe from `paths['sessions']`.
 
     Parameters
     ----------
-    drop_if_nan : list
-        List of columns. Session is dropped if any column from the list is NaN.
-        Defaults to task timing columns.
+    drop_if_nan : list of str
+        Columns used to filter sessions: a session is dropped if any listed
+        column is NaN. Defaults to task timing columns.
     drop_extra_columns : bool
-        If True, drop QC and dataset columns.
+        If True, drop QC and dataset columns and keep only identifiers,
+        start time, control flag, and the full set of task timing columns
+        (`TASKTIMINGS`, regardless of `drop_if_nan`).
+
+    Returns
+    -------
+    df_sessions : pandas.DataFrame
+        Sessions dataframe filtered by `drop_if_nan`.
     """
     df_sessions = pd.read_parquet(paths['sessions'])
     print(f"Total sessions: {len(df_sessions)}")
@@ -511,11 +533,35 @@ def load_sessions(drop_if_nan=TASKTIMINGS, drop_extra_columns=True):
     return df_sessions
 
 
-def load_units(eids=None, unit_filter=None, add_coarse_regions=True):
-    """Convenience function to load units data frame."""
+def load_units(
+    eids=None,
+    unit_filter: str = None,
+    add_coarse_regions: bool = True,
+) -> pd.DataFrame:
+    """
+    Load the units dataframe from `paths['units']`.
+
+    Parameters
+    ----------
+    eids : iterable of str or None
+        If None, no session filter is applied. Otherwise, keep only units
+        whose `eid` is in the provided collection (an empty collection
+        returns zero rows).
+    unit_filter : str or None
+        Optional `pandas.DataFrame.query` expression used to filter units
+        (e.g. quality-control thresholds). If None, no filter is applied.
+    add_coarse_regions : bool
+        If True, add a 'coarse_region' column via
+        `psyfun.atlas.region_parcellation` applied to the 'region' column.
+
+    Returns
+    -------
+    df_units : pandas.DataFrame
+        Units dataframe after optional session and quality filters.
+    """
     df_units = pd.read_parquet(paths['units'])
 
-    if eids:
+    if eids is not None:
         df_units = df_units.query('eid in @eids')
     print(f"N units: {len(df_units)}")
 
@@ -532,16 +578,37 @@ def load_units(eids=None, unit_filter=None, add_coarse_regions=True):
     return df_units
 
 
-def load_session_spikes(unit_filter=None, remove_duplicate_spikes=True):
+def load_session_spikes(
+    unit_filter: str = None,
+    remove_duplicate_spikes: bool = True,
+) -> pd.DataFrame:
     """
-    Convenience functions to load spike times and unit into for analyzable sessions.
+    Load spike times and unit info for analyzable sessions.
+
+    Calls `load_sessions`, restricts `load_units` to those session eids,
+    then loads spike times via `load_spikes` and merges session info in.
+
+    Parameters
+    ----------
+    unit_filter : str or None
+        Optional `pandas.DataFrame.query` expression forwarded to
+        `load_units`.
+    remove_duplicate_spikes : bool
+        Forwarded to `load_spikes` as `remove_duplicates`.
+
+    Returns
+    -------
+    df_spikes : pandas.DataFrame
+        Per-unit rows with columns from the units table, a 'spike_times'
+        column of numpy arrays, and session info merged on
+        ['subject', 'eid'].
     """
     # Load sessions
     df_sessions = load_sessions()  # session info
     eids = df_sessions['eid'].tolist()
 
-    # Load units
-    df_units = load_units(unit_filter=unit_filter)  # unit info
+    # Load units restricted to analyzable sessions
+    df_units = load_units(eids=eids, unit_filter=unit_filter)
 
     # Load spike times
     print("Loading spike times...")
