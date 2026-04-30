@@ -1,4 +1,5 @@
 import os
+import re
 from functools import lru_cache
 import numpy as np
 import pandas as pd
@@ -8,12 +9,18 @@ tqdm.pandas()
 import warnings
 import h5py
 
+from one.alf.exceptions import ALFObjectNotFound
 from brainbox.io.one import SpikeSortingLoader
 from iblatlas.atlas import AllenAtlas
 atlas = AllenAtlas()
 
 from psyfun.atlas import region_parcellation
 from psyfun.config import paths, df_controls, TASKTIMINGS
+
+PASSIVE_PROTOCOL_TOKEN = 'passive'
+SPONTANEOUS_PROTOCOL_TOKEN = 'spontaneous'
+PROTOCOL_REPLAY_DURATION_S = 300.0  # protocol design: 5 min gabor replay
+RAW_TASK_COLLECTION_RE = re.compile(r'^raw_task_data_(\d+)$')
 
 
 def fetch_sessions(one, save=True, qc=False):
@@ -145,61 +152,123 @@ def _label_controls (session, controls=df_controls):
         raise ValueError("More than one entry in df_controls!")
 
 
+def _list_raw_task_collections(eid: str, one) -> list[str]:
+    """All `raw_task_data_NN` collections present for `eid`, sorted by NN."""
+    matches = {
+        m.group(0): int(m.group(1))
+        for d in one.list_datasets(eid)
+        for m in [RAW_TASK_COLLECTION_RE.match(d.split('/')[0])]
+        if m
+    }
+    return [c for c, _ in sorted(matches.items(), key=lambda kv: kv[1])]
+
+
+def _rig_session_datetime(settings: dict) -> datetime:
+    """Local-clock SESSION_DATETIME (or SESSION_START_TIME) from iblrig settings."""
+    raw = settings.get('SESSION_DATETIME') or settings.get('SESSION_START_TIME')
+    if raw is None:
+        raise KeyError("Neither 'SESSION_DATETIME' nor 'SESSION_START_TIME' in taskSettings")
+    return datetime.fromisoformat(raw)
+
+
+def _fpga_timings_from_alf(intervals: pd.DataFrame, gabor: pd.DataFrame | None) -> dict:
+    """
+    Build FPGA-aligned epoch boundaries from canonical alf datasets.
+
+    Uses `intervalsTable` for spontaneous/RFM (both columns valid), and
+    `passiveGabor.start.min()/.stop.max()` for replay if available;
+    otherwise falls back to `intervalsTable.taskReplay[0]` plus the
+    fixed 5-min protocol replay duration. The intervalsTable's
+    `taskReplay` stop is unreliable (extends to end of recording).
+    """
+    if 'Unnamed: 0' in intervals.columns:
+        intervals = intervals.set_index('Unnamed: 0')
+    elif intervals.index.name != '':
+        intervals = intervals.set_index(intervals.columns[0])
+    spont_start, spont_stop = intervals['spontaneousActivity'].iloc[:2].to_list()
+    rfm_start, rfm_stop = intervals['RFM'].iloc[:2].to_list()
+    if gabor is not None and len(gabor) > 0:
+        replay_start = float(gabor['start'].min())
+        replay_stop = float(gabor['stop'].max())
+    else:
+        replay_start = float(intervals['taskReplay'].iloc[0])
+        replay_stop = replay_start + PROTOCOL_REPLAY_DURATION_S
+    return {
+        'spontaneous_start': float(spont_start),
+        'spontaneous_stop': float(spont_stop),
+        'rfm_start': float(rfm_start),
+        'rfm_stop': float(rfm_stop),
+        'replay_start': replay_start,
+        'replay_stop': replay_stop,
+    }
+
+
+def _shift_timings(anchor: dict, anchor_rig_t0: datetime, target_rig_t0: datetime) -> dict:
+    """Translate a passive run's FPGA timings by the rig wall-clock delta."""
+    delta_s = (target_rig_t0 - anchor_rig_t0).total_seconds()
+    return {k: v + delta_s for k, v in anchor.items()
+            if k in {'spontaneous_start', 'spontaneous_stop',
+                     'rfm_start', 'rfm_stop',
+                     'replay_start', 'replay_stop'}}
+
+
+def _load_passive_run(eid: str, raw_col: str, one) -> dict | None:
+    """
+    Load FPGA-aligned timings + rig anchor for one passive `raw_task_data_NN`.
+
+    Returns None if the protocol in this collection is not passive. If alf
+    data is missing, returns dict with `alf_missing=True` so the caller
+    can fill via rig-clock fallback.
+    """
+    settings = one.load_dataset(eid, '_iblrig_taskSettings.raw.json', raw_col)
+    protocol = settings.get('PYBPOD_PROTOCOL', '')
+    if SPONTANEOUS_PROTOCOL_TOKEN in protocol or PASSIVE_PROTOCOL_TOKEN not in protocol:
+        return None
+    rig_t0 = _rig_session_datetime(settings)
+    alf_col = raw_col.replace('raw_task_data_', 'alf/task_')
+    try:
+        intervals = one.load_dataset(eid, '_ibl_passivePeriods.intervalsTable.csv', alf_col)
+    except ALFObjectNotFound:
+        return {'rig_t0': rig_t0, 'alf_missing': True}
+    try:
+        gabor = one.load_dataset(eid, '_ibl_passiveGabor.table.csv', alf_col)
+    except ALFObjectNotFound:
+        gabor = None
+    return {**_fpga_timings_from_alf(intervals, gabor), 'rig_t0': rig_t0}
+
+
 def _fetch_protocol_timings(series, one=None):
     """
-    Get timings of protocol events throughout the recording sesison.
+    Populate `task_NN_<epoch>_<start|stop>` columns in spike-time seconds.
+
+    Iterates `raw_task_data_NN` collections, skips spontaneous-only filler
+    protocols, and reads FPGA-aligned timings from
+    `alf/task_NN/_ibl_passivePeriods.intervalsTable.csv` and
+    `_ibl_passiveGabor.table.csv`. For passive runs without alf data,
+    derives timings from another extracted passive run on the same
+    session via the iblrig wall-clock delta between
+    `SESSION_DATETIME`s. See `specs/fix_dst_task_timings.md`.
     """
     if one is None:
         one = _get_default_connection()
-    session_details = one.get_details(series['eid'])
-    session_start = datetime.fromisoformat(session_details['start_time'])
-    task_count = 0
-    for n, protocol in enumerate(series['tasks']):
-        collection = f'raw_task_data_{n:02d}'
-        try:
-            # Get start time of spontaneous epoch
-            task_settings = one.load_dataset(series['eid'], '_iblrig_taskSettings.raw.json', collection)
-        except:
-            print(f"WARNING: no taskSettings for {series['eid']} {collection}")
-            continue
-        spontaneous_start_str = task_settings.get('SESSION_DATETIME')  # try old entry name
-        if spontaneous_start_str is None:
-            spontaneous_start_str = task_settings.get('SESSION_START_TIME')  # try new entry name
-        if spontaneous_start_str is None:
-            raise KeyError("Neither 'SESSION_DATETIME' nor 'SESSION_START_TIME' found")
-        spontaneous_start = datetime.fromisoformat(spontaneous_start_str)  # convert to datetime object
-        # FIXME: handle spontaneous protocol in 2025 recordings more gracefully!
-        if 'spontaneous' in protocol:
-            # Check for one session where LSD admin was delayed by ~40min
-            if series['eid'] == '4b874c49-3c0c-4f30-9b1f-74c9dbfb57c8':
-                continue
-            # Assume LSD was given at start of spontaneous period
-            series['LSD_admin'] = (spontaneous_start - session_start).seconds
-        # Get gabor patch presentation timings for task replay epoch
-        df_gabor = one.load_dataset(series['eid'], '_iblrig_stimPositionScreen.raw.csv', collection)
-        # first stimulus becomes the header, so we need to pull it out
-        df_gabor = pd.concat([pd.DataFrame([df_gabor.columns], columns=df_gabor.columns), df_gabor], ignore_index=True)
-        # Get start time of first gabor
-        datetime_str = df_gabor.iloc[0, 2]  # start time is in second column
-        replay_start = _datetime_clip_decimals_to_iso(datetime_str)
-        # Get start time of last gabor
-        datetime_str = df_gabor.iloc[-1, 2]
-        replay_stop = _datetime_clip_decimals_to_iso(datetime_str)
-        # Convert datetimes to seconds since session start
-        spontaneous_start = (spontaneous_start - session_start).seconds
-        replay_start = (replay_start - session_start).seconds
-        replay_stop = (replay_stop - session_start).seconds
-        # Fill missing values with estimates based on protocol
-        spontaneous_stop = rfm_start = spontaneous_start + 5 * 60
-        rfm_stop = replay_start
-        # Insert everything into series object
-        series[f'task{task_count:02d}_spontaneous_start'] = spontaneous_start
-        series[f'task{task_count:02d}_spontaneous_stop'] = spontaneous_stop
-        series[f'task{task_count:02d}_rfm_start'] = rfm_start
-        series[f'task{task_count:02d}_rfm_stop'] = rfm_stop
-        series[f'task{task_count:02d}_replay_start'] = replay_start
-        series[f'task{task_count:02d}_replay_stop'] = replay_stop
-        task_count += 1
+    eid = series['eid']
+    for col in TASKTIMINGS:
+        if col != 'LSD_admin':
+            series[col] = np.nan
+    timings: list[dict] = []
+    for raw_col in _list_raw_task_collections(eid, one):
+        run = _load_passive_run(eid, raw_col, one)
+        if run is not None:
+            timings.append(run)
+    anchor = next((t for t in timings if not t.get('alf_missing')), None)
+    if anchor is None:
+        return series
+    for passive_idx, run in enumerate(timings):
+        if run.get('alf_missing'):
+            run = {**_shift_timings(anchor, anchor['rig_t0'], run['rig_t0']), 'rig_t0': run['rig_t0']}
+        for epoch in ('spontaneous', 'rfm', 'replay'):
+            for endpoint in ('start', 'stop'):
+                series[f'task{passive_idx:02d}_{epoch}_{endpoint}'] = run[f'{epoch}_{endpoint}']
     return series
 
 
