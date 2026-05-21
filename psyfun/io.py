@@ -388,7 +388,7 @@ def _pick_sorter(dsr: list[dict], probe: str) -> tuple[str, str]:
 
 def _check_probe(present: set, dsr: list[dict], slot: int, ins: dict | None,
                  session_path) -> dict:
-    """Status of the raw, sync, spike-sorting and bombcell data for one probe slot."""
+    """Status of the raw, sync, spike-sorting, RawEphysQC and bombcell data for one probe slot."""
     prefix = f'probe{slot:02d}'
     if ins is None:
         return {
