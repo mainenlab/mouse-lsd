@@ -396,12 +396,16 @@ def _check_probe(present: set, dsr: list[dict], slot: int, ins: dict | None,
             f'{prefix}_sync.npy': MISSING,
             f'{prefix}_sorter': '',
             **{f'{prefix}_{short}': MISSING for short in SPIKE_SORTING_FILES},
+            f'{prefix}_spectralDensityLF.npy': MISSING,
             f'{prefix}_bombcell_GOOD': np.nan,
         }
     probe = ins['name']
     raw_col = f'raw_ephys_data/{probe}'
     raw_ap = any((raw_col, name) in present for name in _imec_names('ap.cbin', slot))
     sync = any((raw_col, name) in present for name in _imec_names('sync.npy', slot))
+    # Sentinel for the RawEphysQC task: present only when that task completed,
+    # flagging probes left with spike-sorting output but no LFP/QC products.
+    psd_lf = (raw_col, '_iblqc_ephysSpectralDensityLF.power.npy') in present
 
     sorter, version = _pick_sorter(dsr, probe)
     sorter_col = f'alf/{probe}/{sorter}'
@@ -426,6 +430,7 @@ def _check_probe(present: set, dsr: list[dict], slot: int, ins: dict | None,
         f'{prefix}_sync.npy': PRESENT if sync else MISSING,
         f'{prefix}_sorter': version,
         **spike_status,
+        f'{prefix}_spectralDensityLF.npy': PRESENT if psd_lf else MISSING,
         f'{prefix}_bombcell_GOOD': good_proportion,
     }
 

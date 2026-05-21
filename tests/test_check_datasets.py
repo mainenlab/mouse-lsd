@@ -158,12 +158,14 @@ def test_check_probe_complete(tmp_path):
         ("alf/probe00/iblsorter", "spikes.times.npy"),
         ("alf/probe00/iblsorter", "spikes.clusters.npy"),
         ("alf/probe00/iblsorter", "clusters.uuids.csv"),
+        ("raw_ephys_data/probe00", "_iblqc_ephysSpectralDensityLF.power.npy"),
     }
     dsr = [dsr_entry("spikes.times.npy", "alf/probe00/iblsorter",
                      version="iblsorter_1.9.0")]
     out = io._check_probe(present, dsr, 0, ins, tmp_path)
     assert out["probe00_ap.cbin"] == io.PRESENT
     assert out["probe00_sync.npy"] == io.PRESENT
+    assert out["probe00_spectralDensityLF.npy"] == io.PRESENT
     assert out["probe00_sorter"] == "iblsorter_1.9.0"
     assert out["probe00_spikes.times"] == io.PRESENT
     assert out["probe00_spikes.clusters"] == io.PRESENT
@@ -185,6 +187,7 @@ def test_check_probe_imec_double_digit_form(tmp_path):
     assert out["probe01_spikes.times"] == io.MISSING
     assert out["probe01_spikes.clusters"] == io.MISSING
     assert out["probe01_clusters.uuids"] == io.MISSING
+    assert out["probe01_spectralDensityLF.npy"] == io.MISSING
     assert math.isnan(out["probe01_bombcell_GOOD"])
 
 
@@ -208,6 +211,7 @@ def test_check_probe_no_insertion():
     assert out["probe01_clusters.uuids"] == io.MISSING
     assert math.isnan(out["probe01_bombcell_GOOD"])
     assert out["probe01_sorter"] == ""
+    assert out["probe01_spectralDensityLF.npy"] == io.MISSING
 
 
 def test_check_probe_sorter_is_version_verbatim(tmp_path):
