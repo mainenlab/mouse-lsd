@@ -18,3 +18,7 @@ stats/
 # Python package installation
 *.egg-info/
 *.egg
+
+# Specs and tickets are local working files, not version-controlled
+specs/
+tickets/
